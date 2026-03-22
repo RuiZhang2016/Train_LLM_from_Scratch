@@ -1,4 +1,6 @@
 from transformers import PretrainedConfig
+import torch
+from torch import nn 
 
 # huggingface config
 class RaysMindConfig(PretrainedConfig):
@@ -70,3 +72,21 @@ class RaysMindConfig(PretrainedConfig):
             if self.inference_rope_scaling
             else None
         )
+
+
+# RMSNorm
+class RMSNorm(nn.Module):
+    # init
+    def __init__(self, dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    # norm
+    def _norm(self,x:torch.Tensor):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    # forward
+    def forward(self, x: torch.Tensor):
+        return self._norm(x.float()).type_as(x) * self.weight
