@@ -1,6 +1,8 @@
 from transformers import PretrainedConfig
 import torch
 from torch import nn 
+from typing import Optional
+import math
 
 # huggingface config
 class RaysMindConfig(PretrainedConfig):
@@ -90,3 +92,48 @@ class RMSNorm(nn.Module):
     # forward
     def forward(self, x: torch.Tensor):
         return self._norm(x.float()).type_as(x) * self.weight
+
+
+def precompute_freqs_cis(dim: int, end: int(32*1024), rope_base, rope_scaling: Optional[dict]=None):
+    #init rope frequencies 
+    freqs = 1.0 / (rope_base ** (torch.arange(0, dim, 2)[:dim//2]).float()/dim)
+    attn_factor = 1.0
+
+    if rope_scaling is not None:
+        orig_max, factor, beta_fast, beta_slow = rope_scaling['original_max_position_embeddings'], rope_scaling['factor'], rope_scaling['beta_fast'], rope_scaling['beta_slow']
+
+    # if inference length is larger than original max, scale the frequency
+    if end > orig_max:
+        # mapping from ratio b to dimension index
+        inv_dim = lambda b:  (dim*math.log(orig_max/(b*2*math.pi))) / (2* math.log(rope_base))
+
+            # calculate the split point of high frequency and low frequency
+        low, high = (
+            max(math.floor(inv_dim(beta_fast)), 0),
+            min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1),
+        )
+        # calculate the ramp factor
+        ramp = torch.clamp(
+            (torch.arange(dim // 2, device=freqs.device).float() - low)
+            / max(high - low, 0.001),
+            0,
+            1,
+        )
+        # frequency fusion formula: f'(i) = f(i) * ((1-γ) + γ/s)
+        freqs = freqs * (1 - ramp + ramp / factor)
+
+    # generate the position index vector t
+    t = torch.arange(end, device=freqs.device)
+
+    # calculate the outer product
+    freqs = torch.outer(t, freqs).float()
+
+    # calculate the Cos and Sin, and apply the attention compensation factor (attn_factor)
+    freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
+    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
+
+    return freqs_cos, freqs_sin
+
+# RoPE
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    pass
