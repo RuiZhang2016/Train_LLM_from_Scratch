@@ -136,4 +136,17 @@ def precompute_freqs_cis(dim: int, end: int(32*1024), rope_base, rope_scaling: O
 
 # RoPE
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    pass
+    # [a,b] -> [-b, a]
+    def rotate_half(x):
+        x1 = x[..., :x.shape[-1]//2]
+        x2 = x[..., x.shape[-1]//2:]
+        return torch.cat([-x2,x1], dim=-1)
+
+    
+    q_embed = (q * cos.unsqueeze(unsqueeze_dim)) + (
+        rotate_half(q) * sin.unsqueeze(unsqueeze_dim)
+    )
+    k_embed = (k * cos.unsqueeze(unsqueeze_dim)) + (
+        rotate_half(k) * sin.unsqueeze(unsqueeze_dim)
+    )
+    return q_embed, k_embed
