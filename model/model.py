@@ -150,3 +150,17 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
         rotate_half(k) * sin.unsqueeze(unsqueeze_dim)
     )
     return q_embed, k_embed
+
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    bs, slen, num_key_value_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+
+    return (x[:,:,:,None,:].expand(bs, slen, num_key_value_heads, n_rep, head_dim)).reshape(bs, slen, num_key_value_heads * n_rep, head_dim)
+
+class Attention(nn.Moudle):
+    def __init__(self, args: RaysMindConfig):
+        super().__init__()
+
+        self.num_key_value_heads = args.num_key_value_heads
+        
