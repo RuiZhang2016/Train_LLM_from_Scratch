@@ -1,8 +1,9 @@
 from transformers import PretrainedConfig
 import torch
 from torch import nn 
-from typing import Optional
+from typing import Optional, Tuple
 import math
+from torch.nn import functional as F
 
 # huggingface config
 class RaysMindConfig(PretrainedConfig):
@@ -135,13 +136,12 @@ def precompute_freqs_cis(dim: int, end: int(32*1024), rope_base, rope_scaling: O
     return freqs_cos, freqs_sin
 
 # RoPE
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     # [a,b] -> [-b, a]
     def rotate_half(x):
         x1 = x[..., :x.shape[-1]//2]
         x2 = x[..., x.shape[-1]//2:]
         return torch.cat([-x2,x1], dim=-1)
-
     
     q_embed = (q * cos.unsqueeze(unsqueeze_dim)) + (
         rotate_half(q) * sin.unsqueeze(unsqueeze_dim)
@@ -162,5 +162,76 @@ class Attention(nn.Moudle):
     def __init__(self, args: RaysMindConfig):
         super().__init__()
 
-        self.num_key_value_heads = args.num_key_value_heads
+        self.num_key_value_heads = args.num_key_value_heads if args.num_key_value_heads is not None else args.num_attention_heads
+        assert self.num_key_value_heads % args.num_attention_heads == 0, "num_key_value_heads must be divisible by num_attention_heads"
+
+        self.n_local_heads = args.num_attention_heads
+        self.n_local_kv_heads = self.num_key_value_heads
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        self.head_dim = args.hidden_size // args.num_attention_heads
+
+        self.q_proj = nn.Linear(args.hidden_size, args.num_attention_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(args.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(args.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(args.num_attention_heads * self.head_dim, self.hidden_size, bias=False)
+
+        self.attn_dropout = nn.Dropout(args.dropout)
+        self.resid_dropout = nn.Dropout(args.dropout)
+        self.dropout = args.dropout
+        self.flash = (hasattr(torch.nn.functional, 'scaled_dot_product_attention') and args.flash_attention)
+
+    
+    def forward(self, x: torch.Tensor, 
+        position_embedding: Tuple[torch.Tensor, torch.Tensor], 
+        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
+        use_cache: bool = False, 
+        attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        # compute Q, K, V
+        bsz, seq_len, _ = x.shape
+        xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        # split Q, K, V into local heads by view
+        q = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
+        k = xk.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
+        v = xv.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
+
+        # use rope for Q and K
+        cos, sin = position_embedding
+        xq, xk = apply_rotary_pos_emb(q, k, cos[:seq_len], sin[:seq_len])
+        # use repeat_kv for K, V (note: kv cache)
+        
+        if past_key_value is not None:
+            xk = torch.cat([past_key_value[0], xk], dim=1)
+            xv = torch.cat([past_key_value[1], xv], dim=1)
+        past_key_value = (xk, xv) if use_cache else None
+
+        xq, xk, xv = (
+            xq.transpose(1,2),
+            repeat_kv(xk, self.n_rep).transpose(1,2),
+            repeat_kv(xv, self.n_rep).transpose(1,2)
+            )
+        
+        # compute attention scores, Q@K^T/sqrt(d)
+        if self.flash and seq_len > 1 and (attention_mask is None or torch.all(attention_mask == 1)):
+            attn_mask = (None if attention_mask is None else attention_mask.view(bsz,1,1,-1).expand(bsz, self.n_local_heads, seq_len, -1).bool())
+            output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            
+
+        # concat and apply softmax
+        
+        
+        
+        
+
+
+
+
+
+
+
+
+
+
+
         
