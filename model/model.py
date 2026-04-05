@@ -191,9 +191,9 @@ class Attention(nn.Moudle):
         bsz, seq_len, _ = x.shape
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         # split Q, K, V into local heads by view
-        q = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
-        k = xk.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
-        v = xv.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
+        xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
+        xk = xk.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
+        xv = xv.view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
 
         # use rope for Q and K
         cos, sin = position_embedding
@@ -203,7 +203,7 @@ class Attention(nn.Moudle):
         if past_key_value is not None:
             xk = torch.cat([past_key_value[0], xk], dim=1)
             xv = torch.cat([past_key_value[1], xv], dim=1)
-        past_key_value = (xk, xv) if use_cache else None
+        past_kv = (xk, xv) if use_cache else None
 
         xq, xk, xv = (
             xq.transpose(1,2),
@@ -214,11 +214,24 @@ class Attention(nn.Moudle):
         # compute attention scores, Q@K^T/sqrt(d)
         if self.flash and seq_len > 1 and (attention_mask is None or torch.all(attention_mask == 1)):
             attn_mask = (None if attention_mask is None else attention_mask.view(bsz,1,1,-1).expand(bsz, self.n_local_heads, seq_len, -1).bool())
-            output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0, is_causal=True)
-        else:
-            
+            output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, 
+            dropout_p=self.dropout if self.training else 0, is_causal=True)
 
+        else:
+            scores = (xq @ xk.transpose(-2, -1)) * (1 / math.sqrt(self.head_dim))
+            scores = scores + torch.triu(torch.full((seq_len, seq_len), float('-inf'),device=scores.device), diagnonal=1).unsqueeze(0).unsqueeze(0)
+            if attention_mask is not None:
+                extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+                extended_attention_mask = (1.0 - extended_attention_mask) * -1e9
+                scores = scores + extended_attention_mask
         # concat and apply softmax
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        scores = self.attn_dropout(scores) 
+        output = scores @ xv
+        # [gsz, n_local_heads, seq_len, head_dim] -> [gsz, seq_len, n_local_heads * head_dim]
+        output = output.transpose(1,2).reshape(bsz, seq_len, -1)
+        output = self.resid_dropout(self.o_proj(output))
+        return output, past_kv
         
         
         
