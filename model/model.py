@@ -4,6 +4,7 @@ from torch import nn
 from typing import Optional, Tuple
 import math
 from torch.nn import functional as F
+from .activation_functions import ACT2FN
 
 # huggingface config
 class RaysMindConfig(PretrainedConfig):
@@ -234,9 +235,30 @@ class Attention(nn.Moudle):
         return output, past_kv
         
         
-        
-        
+class FeedForward(nn.Module):
+    # 初始化
+    # 升维
+    # 降维
+    # 门控
+    # dropout
+    # 激活函数
 
+    def __init__(self, args: RaysMindConfig):
+        super().__init__()
+
+        if args.intermediate_size is None:
+            intermediate_size = int(args.hidden_size*8/3)
+            args.intermediate_size = 64*((intermediate_size+(64-1))//64)
+
+        self.up_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False) 
+        self.down_proj = nn.Linear(args.intermediate_size, args.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.dropout = nn.Dropout(args.dropout)
+        self.act_fn = ACT2FN[args.hidden_act]
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dropout(self.down_proj(self.act_fn(self.gate_proj(x))*self.up_proj(x)))
 
 
 
